@@ -31,49 +31,47 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    
-    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-    <meta http-equiv="Pragma" content="no-cache">
-    <meta http-equiv="Expires" content="0">
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
 
+        <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 
-    <title>Cardápio Sheets</title>
+        <title>Cardápio Sheets</title>
 
 <!--   INSIRA ABAIXO AS TAGS DE SEO -->
 
 
 
 <!--   INSIRA ACIMA AS TAGS DE SEO -->
-    <script src="config.js"></script>
+    <script src="config.js" defer></script>
     <script>
         // Teste de carregamento do sistema localStorage
         document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(() => {
-                debugLog('🧪 Testando sistema localStorage...');
-                debugLog('✅ initializeStorageSystem:', typeof initializeStorageSystem);
-                debugLog('✅ saveCartToStorage:', typeof saveCartToStorage);
-                debugLog('✅ loadCartFromStorage:', typeof loadCartFromStorage);
-                debugLog('✅ saveCouponToStorage:', typeof saveCouponToStorage);
-                debugLog('✅ Sistema localStorage carregado com sucesso!');
-            }, 500);
+                         setTimeout(() => {
+                 debugLog('🧪 Testando sistema localStorage...');
+                 debugLog('✅ initializeStorageSystem:', typeof initializeStorageSystem);
+                 debugLog('✅ saveCartToStorage:', typeof saveCartToStorage);
+                 debugLog('✅ loadCartFromStorage:', typeof loadCartFromStorage);
+                 debugLog('✅ saveCouponToStorage:', typeof saveCouponToStorage);
+                 debugLog('✅ Sistema localStorage carregado com sucesso!');
+             }, 100);
         });
     </script>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com" defer></script>
     <!-- QR Code Library -->
-    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <!-- QRCode lib removida do carregamento inicial para reduzir bloqueio; carregada sob demanda quando necessário -->
     <style>
+        /* Performance: use display=swap and preconnect added below */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
         
         /* ===== ANTI-FLASH: OCULTAR CONTEÚDO ATÉ CARREGAMENTO COMPLETO ===== */
-        body {
-            visibility: hidden;
-        }
-        
-        body.loaded {
-            visibility: visible;
-        }
+        body { visibility: hidden; }
+        body.loaded { visibility: visible; }
         
         /* Garantir que o preloader seja sempre visível */
         #preloader {
@@ -1562,6 +1560,60 @@
         // CSV URLs - agora importadas do config.js
         // As URLs das planilhas estão definidas no arquivo config.js
 
+        // Web Worker helpers for non-blocking CSV parsing
+        let csvWorker;
+        function getCsvWorker() {
+            if (!csvWorker) {
+                try {
+                    csvWorker = new Worker('csvWorker.js');
+                } catch (e) {
+                    errorLog && errorLog('Failed to create CSV worker:', e);
+                }
+            }
+            return csvWorker;
+        }
+
+        function parseCSVInWorker(csvText) {
+            return new Promise((resolve, reject) => {
+                const worker = getCsvWorker();
+                if (!worker) {
+                    // Fallback to main-thread parser if worker creation fails
+                    try {
+                        const fallback = parseCSV(csvText);
+                        return resolve(fallback);
+                    } catch (err) {
+                        return reject(err);
+                    }
+                }
+                const onMessage = (e) => {
+                    const { type, data, error } = e.data || {};
+                    if (type === 'parsed') {
+                        worker.removeEventListener('message', onMessage);
+                        worker.removeEventListener('error', onError);
+                        resolve(data);
+                    } else if (type === 'error') {
+                        worker.removeEventListener('message', onMessage);
+                        worker.removeEventListener('error', onError);
+                        reject(new Error(error || 'CSV parse error'));
+                    }
+                };
+                const onError = (err) => {
+                    worker.removeEventListener('message', onMessage);
+                    worker.removeEventListener('error', onError);
+                    reject(err);
+                };
+                worker.addEventListener('message', onMessage);
+                worker.addEventListener('error', onError);
+                worker.postMessage({ type: 'parse', text: csvText });
+            });
+        }
+
+        async function fetchCsvStream(url) {
+            const response = await fetch(url, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            return await response.text();
+        }
+
         // Global configuration object
         let appConfig = {
             identidade_visual: {},
@@ -1668,17 +1720,10 @@
             try {
                 debugLog('Loading CSV from:', url);
                 
-                const response = await fetch(url);
-                debugLog('Response status:', response.status);
-                
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                
-                const csvText = await response.text();
+                const csvText = await fetchCsvStream(url);
                 debugLog('CSV loaded:', csvText.length, 'chars');
                 
-                const parsedData = parseCSV(csvText);
+                const parsedData = await parseCSVInWorker(csvText);
                 infoLog('Data loaded:', parsedData.length, 'items from', url.split('/').pop());
                 
                 return parsedData;
@@ -2973,43 +3018,61 @@
                 showPreloader();
                 updateProgress(5);
                 
-                // Inicializar sistema de localStorage
                 if (typeof initializeStorageSystem === 'function') {
                     initializeStorageSystem();
                 }
 
-                // Load configuration data first
+                // Config first to apply UI early
                 infoLog('Loading configuration data...');
-                configData = await loadCSVData(CONFIG_CSV_URL);
-                appConfig = processConfigData(configData);
-                debugLog('Configuration loaded:', Object.keys(appConfig).length, 'sections');
-                
-                // DEBUG: Log detalhado do appConfig carregado
-                debugLog('🔠 === DEBUG APP CONFIG CARREGADO ===');
-                debugLog('appConfig completo:', appConfig);
-                debugLog('appConfig.checkout:', appConfig.checkout);
-                debugLog('orders_all_time:', appConfig?.checkout?.orders_all_time);
-                debugLog('=== FIM DEBUG APP CONFIG ===');
+                const configPromise = loadCSVData(CONFIG_CSV_URL).then((data) => {
+                    configData = data;
+                    appConfig = processConfigData(configData);
+                    debugLog('Configuration loaded:', Object.keys(appConfig).length, 'sections');
+                    debugLog('🔠 === DEBUG APP CONFIG CARREGADO ===');
+                    debugLog('appConfig completo:', appConfig);
+                    debugLog('appConfig.checkout:', appConfig.checkout);
+                    debugLog('orders_all_time:', appConfig?.checkout?.orders_all_time);
+                    debugLog('=== FIM DEBUG APP CONFIG ===');
+                    applyConfiguration();
+                });
                 updateProgress(15);
 
-                // Apply configuration to the page
-                applyConfiguration();
-                updateProgress(20);
+                // Parallel loads
+                infoLog('Loading CSV data in parallel...');
+                const categoriesPromise = loadCSVData(CATEGORIES_CSV_URL).then((d) => { categoriesData = d; });
+                const menuPromise       = loadCSVData(MENU_CSV_URL);
+                const hoursPromise      = loadCSVData(HOURS_CSV_URL).then((d) => { hoursData = d; });
+                const neighborhoodsPromise = loadCSVData(NEIGHBORHOODS_CSV_URL).then((d) => {
+                    neighborhoodsData = (d || []).map(row => ({
+                        bairro: (row.bairro || row.nome_bairro || row.Bairro || row.BAIRRO || '').trim().toLowerCase(),
+                        taxa: parseFloat((row.taxa || row.valor_taxa || row.Taxa || row.TAXA || '0').toString().replace(',', '.')) || 0
+                    })).filter(item => item.bairro);
+                    window.neighborhoodsData = neighborhoodsData;
+                    prepareNeighborhoodsAutocomplete?.();
+                }).catch((e) => { errorLog('❌ Error loading neighborhoods:', e.message); neighborhoodsData = []; });
+                const couponsPromise = loadCSVData(COUPONS_CSV_URL).then((d) => { couponsData = d; }).catch((e) => { errorLog('❌ Error loading coupons:', e.message); couponsData = []; });
 
-                // Load categories data
-                infoLog('Loading categories data...');
-                categoriesData = await loadCSVData(CATEGORIES_CSV_URL);
-                updateProgress(40);
+                await configPromise;
+                updateProgress(35);
 
-                // Load menu items data
-                infoLog('Loading menu items data...');
-                const menuItems = await loadCSVData(MENU_CSV_URL);
-                updateProgress(65);
+                await Promise.allSettled([hoursPromise]);
+                if (hoursData && hoursData.length > 0) {
+                    debugLog('🚀 Initializing global timezone...');
+                    initializeGlobalTimezone();
+                    if (!globalTimezone) {
+                        warnLog('❌ Timezone system not configured properly');
+                    }
+                }
+                updateProgress(55);
 
-                // Load hours data
-                infoLog('Loading hours data...');
-                hoursData = await loadCSVData(HOURS_CSV_URL);
-                debugLog('Hours data loaded:', hoursData.length, 'entries');
+                const [menuItemsResult] = await Promise.all([menuPromise, categoriesPromise]);
+                const menuItems = menuItemsResult;
+                updateProgress(85);
+
+                // Optional datasets (neighborhoods, coupons) continue loading in background
+                debugLog('Processing and organizing data...');
+                menuData = processMenuData(menuItems, categoriesData);
+                updateProgress(95);
                 
                 if (hoursData.length > 0) {
                     // Inicializar timezone global
@@ -3064,23 +3127,17 @@
                 menuData = processMenuData(menuItems, categoriesData);
                 updateProgress(95);
 
-                // Update operating hours display
-                updateOperatingHours();
-                
-                // Set up periodic updates for operating hours (every minute)
-                setInterval(updateOperatingHours, 60000);
-
-                // Mark data as loaded
+                // Initialize app with processed data
+                debugLog('Initializing application...');
+                initializeApp();
                 isDataLoaded = true;
                 updateProgress(100);
+                hidePreloader();
 
-                infoLog('Data loaded successfully:', { categoriesData, menuData });
-                
-                // Hide preloader and initialize app
-                setTimeout(() => {
-                    hidePreloader();
-                    initializeApp();
-                }, 500);
+                // After initial paint, finalize optional data readiness
+                Promise.allSettled([neighborhoodsPromise, couponsPromise]).then(() => {
+                    debugLog('Optional datasets ready');
+                });
 
             } catch (error) {
                 errorLog('Error loading data:', error);
@@ -11698,6 +11755,21 @@
          * Abre o modal do QR Code e gera o código (versão simplificada)
          */
         async function openQRCodeModal() {
+            // Lazy load QRCode library only when needed
+            if (!window.QRCode && !window.qrcode) {
+                try {
+                    await new Promise((resolve, reject) => {
+                        const s = document.createElement('script');
+                        s.src = 'https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js';
+                        s.defer = true;
+                        s.onload = resolve;
+                        s.onerror = reject;
+                        document.head.appendChild(s);
+                    });
+                } catch (e) {
+                    warnLog && warnLog('Falha ao carregar QRCode lib sob demanda:', e);
+                }
+            }
             const modal = document.getElementById('qrcode-modal');
             const qrcodeDisplay = document.getElementById('qrcode-display');
             const urlInput = document.getElementById('qrcode-url');
