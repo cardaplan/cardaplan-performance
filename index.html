@@ -1575,9 +1575,10 @@
 
         function parseCSVInWorker(csvText) {
             return new Promise((resolve, reject) => {
-                const worker = getCsvWorker();
-                if (!worker) {
-                    // Fallback to main-thread parser if worker creation fails
+                let worker;
+                try {
+                    worker = new Worker('csvWorker.js');
+                } catch (e) {
                     try {
                         const fallback = parseCSV(csvText);
                         return resolve(fallback);
@@ -1585,21 +1586,23 @@
                         return reject(err);
                     }
                 }
+                const cleanup = () => {
+                    worker.removeEventListener('message', onMessage);
+                    worker.removeEventListener('error', onError);
+                    try { worker.terminate(); } catch (_) {}
+                };
                 const onMessage = (e) => {
                     const { type, data, error } = e.data || {};
                     if (type === 'parsed') {
-                        worker.removeEventListener('message', onMessage);
-                        worker.removeEventListener('error', onError);
+                        cleanup();
                         resolve(data);
                     } else if (type === 'error') {
-                        worker.removeEventListener('message', onMessage);
-                        worker.removeEventListener('error', onError);
+                        cleanup();
                         reject(new Error(error || 'CSV parse error'));
                     }
                 };
                 const onError = (err) => {
-                    worker.removeEventListener('message', onMessage);
-                    worker.removeEventListener('error', onError);
+                    cleanup();
                     reject(err);
                 };
                 worker.addEventListener('message', onMessage);
@@ -3088,38 +3091,7 @@
                 }
                 updateProgress(80);
 
-                // Load neighborhoods data for delivery fees
-                debugLog('🏠️ Loading neighborhoods data...');
-                try {
-                    neighborhoodsData = await loadCSVData(NEIGHBORHOODS_CSV_URL);
-                    // Process neighborhoods data - mapear para formato consistente
-                    neighborhoodsData = neighborhoodsData.map(row => ({
-                        // Tentar várias possibilidades de nomes de colunas
-                        bairro: (row.bairro || row.nome_bairro || row.Bairro || row.BAIRRO || '').trim().toLowerCase(),
-                        taxa: parseFloat((row.taxa || row.valor_taxa || row.Taxa || row.TAXA || '0').toString().replace(',', '.')) || 0
-                    })).filter(item => item.bairro); // Remove empty entries
-                    
-                    // Expor dados globalmente para acesso em outras funções
-                    window.neighborhoodsData = neighborhoodsData;
-                    
-                    // Preparar lista para autocomplete
-                    prepareNeighborhoodsAutocomplete();
-                    
-                    infoLog(`✅ Neighborhoods loaded:`, neighborhoodsData.length, 'items');
-                } catch (error) {
-                    errorLog('❌ Error loading neighborhoods:', error.message);
-                    neighborhoodsData = []; // Fallback to empty array
-                }
-                
-                // Load coupons data
-                debugLog('🎟️ Loading coupons data...');
-                try {
-                    couponsData = await loadCSVData(COUPONS_CSV_URL);
-                    infoLog(`✅ Coupons loaded:`, couponsData.length, 'items');
-                } catch (error) {
-                    errorLog('❌ Error loading coupons:', error.message);
-                    couponsData = []; // Fallback to empty array
-                }
+                // Optional datasets continue in background (already started earlier)
                 updateProgress(85);
 
                 // Process and organize data
