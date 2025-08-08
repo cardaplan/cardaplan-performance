@@ -3134,6 +3134,14 @@
                 updateProgress(100);
                 hidePreloader();
 
+                // Schedule operating hours updates without blocking init
+                try {
+                    updateOperatingHours();
+                    setInterval(updateOperatingHours, 60000);
+                } catch (e) {
+                    warnLog && warnLog('Falha ao agendar atualização de horário:', e);
+                }
+
                 // After initial paint, finalize optional data readiness
                 Promise.allSettled([neighborhoodsPromise, couponsPromise]).then(() => {
                     debugLog('Optional datasets ready');
